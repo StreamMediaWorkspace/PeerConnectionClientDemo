@@ -24,6 +24,12 @@
 #include "rtc_base/win32.h"
 #endif  // WEBRTC_WIN
 
+//d3d9
+#define D3D9
+#include <d3d9.h>
+#pragma comment(lib, "d3d9.lib")
+
+
 class MainWndCallback {
  public:
   virtual void StartLogin(const std::string& server, int port) = 0;
@@ -104,6 +110,41 @@ class MainWnd : public MainWindow {
 
   HWND handle() const { return wnd_; }
 
+
+  class D3D9VideoRender : public rtc::VideoSinkInterface<webrtc::VideoFrame> {
+  public:
+	  D3D9VideoRender(HWND wnd,
+		  int x,
+		  int y,
+		  int width,
+		  int height,
+		  webrtc::VideoTrackInterface* track_to_render);
+	  virtual ~D3D9VideoRender();
+
+	  bool init();
+
+	  void OnFrame(const webrtc::VideoFrame& frame) override;
+
+  private:
+	  void Cleanup();
+
+  private:
+	  rtc::scoped_refptr<IDirect3D9> d3d_;
+	  rtc::scoped_refptr<IDirect3DDevice9> d3d_device_;
+	  rtc::scoped_refptr<IDirect3DSurface9> m_pDirect3DSurfaceRender = NULL;
+	  RECT m_rtViewport;
+
+	  HWND wnd_;
+	  int width_ = 0;
+	  int height_ = 0;
+
+	  int x_ = 0;
+	  int y_ = 0;
+	  CRITICAL_SECTION  m_critial;
+	  rtc::scoped_refptr<webrtc::VideoTrackInterface> rendered_track_;
+	  bool inited_ = false;
+  };
+
   class VideoRenderer : public rtc::VideoSinkInterface<webrtc::VideoFrame> {
    public:
     VideoRenderer(HWND wnd,
@@ -158,7 +199,9 @@ class MainWnd : public MainWindow {
     LISTBOX_ID,
   };
 
+#ifndef D3D9
   void OnPaint();
+#endif
   void OnDestroyed();
 
   void OnDefaultAction();
@@ -181,8 +224,14 @@ class MainWnd : public MainWindow {
   void HandleTabbing();
 
  private:
-  std::unique_ptr<VideoRenderer> local_renderer_;
-  std::unique_ptr<VideoRenderer> remote_renderer_;
+#ifdef D3D9
+	 std::unique_ptr<D3D9VideoRender> local_renderer_;
+	 std::unique_ptr<D3D9VideoRender> remote_renderer_;
+#else
+	 std::unique_ptr<VideoRenderer> local_renderer_;
+	 std::unique_ptr<VideoRenderer> remote_renderer_;
+#endif
+  
   UI ui_;
   HWND wnd_;
   DWORD ui_thread_id_;

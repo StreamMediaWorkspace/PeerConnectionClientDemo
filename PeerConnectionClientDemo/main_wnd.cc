@@ -210,7 +210,11 @@ void MainWnd::MessageBox(const char* caption, const char* text, bool is_error) {
 }
 
 void MainWnd::StartLocalRenderer(webrtc::VideoTrackInterface* local_video) {
+#ifdef D3D9
+	local_renderer_.reset(new D3D9VideoRender(handle(), 0, 0, 320, 240, local_video));
+#else
   local_renderer_.reset(new VideoRenderer(handle(), 1, 1, local_video));
+#endif
 }
 
 void MainWnd::StopLocalRenderer() {
@@ -218,7 +222,11 @@ void MainWnd::StopLocalRenderer() {
 }
 
 void MainWnd::StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video) {
+#ifdef D3D9
+	remote_renderer_.reset(new D3D9VideoRender(handle(), 0, 240, 320, 240, remote_video));
+#else
   remote_renderer_.reset(new VideoRenderer(handle(), 1, 1, remote_video));
+#endif
 }
 
 void MainWnd::StopRemoteRenderer() {
@@ -231,7 +239,9 @@ void MainWnd::QueueUIThreadCallback(int msg_id, void* data) {
                       reinterpret_cast<LPARAM>(data));
 }
 
+#ifndef D3D9
 void MainWnd::OnPaint() {
+
   PAINTSTRUCT ps;
   ::BeginPaint(handle(), &ps);
 
@@ -325,12 +335,13 @@ void MainWnd::OnPaint() {
 
   ::EndPaint(handle(), &ps);
 }
+#endif
 
 void MainWnd::OnDestroyed() {
   PostQuitMessage(0);
 }
 
-void MainWnd::OnDefaultAction() {
+void MainWnd::OnDefaultAction() {//连接按钮点击
   if (!callback_)
     return;
   if (ui_ == CONNECT_TO_SERVER) {
@@ -357,9 +368,11 @@ bool MainWnd::OnMessage(UINT msg, WPARAM wp, LPARAM lp, LRESULT* result) {
       *result = TRUE;
       return true;
 
+#ifndef D3D9
     case WM_PAINT:
       OnPaint();
       return true;
+#endif
 
     case WM_SETFOCUS:
       if (ui_ == CONNECT_TO_SERVER) {
@@ -630,4 +643,156 @@ void MainWnd::VideoRenderer::OnFrame(const webrtc::VideoFrame& video_frame) {
                        buffer->width(), buffer->height());
   }
   InvalidateRect(wnd_, NULL, TRUE);
+}
+
+
+//d3d9 render
+MainWnd::D3D9VideoRender::D3D9VideoRender(HWND wnd,
+	int x,
+	int y,
+	int width,
+	int height,
+	webrtc::VideoTrackInterface* track_to_render)
+	: wnd_(wnd), 
+	rendered_track_(track_to_render),
+	width_(width), 
+	height_(height),
+	x_(x),
+	y_(y){
+	rendered_track_->AddOrUpdateSink(this, rtc::VideoSinkWants());
+	
+	//init();
+}
+
+MainWnd::D3D9VideoRender::~D3D9VideoRender() {
+	rendered_track_->RemoveSink(this);
+	Cleanup();
+}
+
+bool MainWnd::D3D9VideoRender::init() {
+	if (inited_) {
+		return true;
+	}
+	InitializeCriticalSection(&m_critial);
+	Cleanup();
+
+	d3d_ = Direct3DCreate9(D3D_SDK_VERSION);
+	if (d3d_ == NULL) {
+		//Destroy();
+		return false;
+	}
+
+	//GetClientRect(wnd_, &m_rtViewport);
+	m_rtViewport.left = x_;
+	m_rtViewport.top = y_;
+	m_rtViewport.right = x_ + width_;
+	m_rtViewport.bottom = y_ + height_;
+
+	D3DPRESENT_PARAMETERS d3d_params = {};
+
+	d3d_params.Windowed = TRUE;
+	d3d_params.SwapEffect = D3DSWAPEFFECT_COPY;
+
+	IDirect3DDevice9* d3d_device;
+	if (d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, wnd_,
+		D3DCREATE_SOFTWARE_VERTEXPROCESSING, &d3d_params,
+		&d3d_device) != D3D_OK) {
+		//Destroy();
+		return false;
+	}
+	d3d_device_ = d3d_device;
+	d3d_device->Release();
+
+	IDirect3DSurface9 *pDirect3DSurfaceRender = nullptr;
+	d3d_device_->CreateOffscreenPlainSurface(width_, height_,
+		(D3DFORMAT)MAKEFOURCC('Y', 'V', '1', '2'),
+		D3DPOOL_DEFAULT,
+		&pDirect3DSurfaceRender,
+		NULL);
+
+	if (!pDirect3DSurfaceRender) {
+		return false;
+	}
+
+	m_pDirect3DSurfaceRender = pDirect3DSurfaceRender;
+	inited_ = true;
+	return 0;
+}
+
+void MainWnd::D3D9VideoRender::OnFrame(const webrtc::VideoFrame& frame)
+{
+	rtc::scoped_refptr<webrtc::I420BufferInterface> buffer(frame.video_frame_buffer()->GetI420());
+	
+	//width_ = 160;// buffer->width();
+	//height_ = 120;// buffer->height();
+
+	init();
+
+	rtc::StringBuilder ss;
+	ss << "OnFrame\n";
+
+	if (m_pDirect3DSurfaceRender == NULL) {
+		rtc::StringBuilder ss;
+		ss << "m_pDirect3DSurfaceRender is null";
+		return;
+	}
+
+	HRESULT lRet;
+
+	D3DLOCKED_RECT d3d_rect;
+	lRet = m_pDirect3DSurfaceRender->LockRect(&d3d_rect, NULL, D3DLOCK_DONOTWAIT);
+	if (FAILED(lRet)) {
+		rtc::StringBuilder ss;
+		ss << "LockRect failed";
+		return;
+	}
+
+	int y_stride = d3d_rect.Pitch;
+	int v_stride = y_stride / 2;
+	int u_stride = y_stride / 2;
+
+	uint8_t* y_dest = (uint8_t*)d3d_rect.pBits;
+	uint8_t* v_dest = y_dest + height_ * y_stride;
+	uint8_t* u_dest = v_dest + height_ / 2 * v_stride;
+
+	for (uint32_t i = 0; i < height_; i++) {
+		memcpy(y_dest + i * y_stride, (uint8_t*)buffer->DataY() + i * buffer->width(), buffer->width());
+	}
+
+	for (uint32_t i = 0; i < height_ / 2; i++) {
+		memcpy(v_dest + i * v_stride, (uint8_t*)buffer->DataU() + i * buffer->width() / 2, buffer->width() / 2);
+	}
+
+	for (uint32_t i = 0; i < height_ / 2; i++) {
+		memcpy(u_dest + i * u_stride, (uint8_t*)buffer->DataV() + i * buffer->width() / 2, buffer->width() / 2);
+	}
+
+	lRet = m_pDirect3DSurfaceRender->UnlockRect();
+	if (FAILED(lRet))
+		return;
+
+	if (d3d_device_ == NULL)
+		return;
+
+	d3d_device_->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_XRGB(0, 0, 0), 1.0f, 0);
+	d3d_device_->BeginScene();
+	IDirect3DSurface9 * pBackBuffer = NULL;
+
+	d3d_device_->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &pBackBuffer);
+	d3d_device_->StretchRect(m_pDirect3DSurfaceRender, NULL, pBackBuffer, &m_rtViewport, D3DTEXF_LINEAR);
+	d3d_device_->EndScene();
+	d3d_device_->Present(NULL, &m_rtViewport, NULL, NULL);
+	pBackBuffer->Release();
+}
+
+void MainWnd::D3D9VideoRender::Cleanup()
+{
+	EnterCriticalSection(&m_critial);
+	if (m_pDirect3DSurfaceRender)
+		m_pDirect3DSurfaceRender->Release();
+	if (d3d_device_)
+		d3d_->Release();
+	if (d3d_)
+		d3d_->Release();
+	LeaveCriticalSection(&m_critial);
 }
