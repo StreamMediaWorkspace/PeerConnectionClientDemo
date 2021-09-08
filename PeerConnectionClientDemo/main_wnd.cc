@@ -18,6 +18,7 @@
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
 #include "third_party/libyuv/include/libyuv/convert_argb.h"
+#include "common_video/libyuv/include/webrtc_libyuv.h"
 
 ATOM MainWnd::wnd_class_ = 0;
 const wchar_t MainWnd::kClassName[] = L"WebRTC_MainWnd";
@@ -210,8 +211,10 @@ void MainWnd::MessageBox(const char* caption, const char* text, bool is_error) {
 }
 
 void MainWnd::StartLocalRenderer(webrtc::VideoTrackInterface* local_video) {
-#ifdef D3D9
-	local_renderer_.reset(new D3D9VideoRender(handle(), 0, 0, 320, 240, local_video));
+#ifdef D3D9TEXT
+	local_renderer_.reset(new D3DTextureVideoRender(handle(), 0, 0, 800, 200, local_video));
+#elif defined D3D9
+	local_renderer_.reset(new D3D9VideoRender(handle(), 0, 0, 600, 300, local_video));
 #else
   local_renderer_.reset(new VideoRenderer(handle(), 1, 1, local_video));
 #endif
@@ -222,8 +225,10 @@ void MainWnd::StopLocalRenderer() {
 }
 
 void MainWnd::StartRemoteRenderer(webrtc::VideoTrackInterface* remote_video) {
-#ifdef D3D9
-	remote_renderer_.reset(new D3D9VideoRender(handle(), 0, 240, 320, 240, remote_video));
+#ifdef D3D9TEXT
+	remote_renderer_.reset(new D3DTextureVideoRender(handle(), 801, 0, 800, 200, remote_video));
+#elif defined D3D9
+	remote_renderer_.reset(new D3D9VideoRender(handle(), 0, 301, 600, 300, remote_video));
 #else
   remote_renderer_.reset(new VideoRenderer(handle(), 1, 1, remote_video));
 #endif
@@ -239,7 +244,7 @@ void MainWnd::QueueUIThreadCallback(int msg_id, void* data) {
                       reinterpret_cast<LPARAM>(data));
 }
 
-#ifndef D3D9
+#if !defined (D3D9) && !defined(D3D9TEXT)
 void MainWnd::OnPaint() {
 
   PAINTSTRUCT ps;
@@ -368,7 +373,7 @@ bool MainWnd::OnMessage(UINT msg, WPARAM wp, LPARAM lp, LRESULT* result) {
       *result = TRUE;
       return true;
 
-#ifndef D3D9
+#if !defined (D3D9) && !defined(D3D9TEXT)
     case WM_PAINT:
       OnPaint();
       return true;
@@ -661,7 +666,8 @@ MainWnd::D3D9VideoRender::D3D9VideoRender(HWND wnd,
 	y_(y){
 	rendered_track_->AddOrUpdateSink(this, rtc::VideoSinkWants());
 	
-	//init();
+	InitializeCriticalSection(&m_critial);
+	init();
 }
 
 MainWnd::D3D9VideoRender::~D3D9VideoRender() {
@@ -670,10 +676,9 @@ MainWnd::D3D9VideoRender::~D3D9VideoRender() {
 }
 
 bool MainWnd::D3D9VideoRender::init() {
-	if (inited_) {
-		return true;
-	}
-	InitializeCriticalSection(&m_critial);
+	rtc::StringBuilder ss;
+	//ss << rtc::Thread::Current()->name().c_str() << "OnFrame\n";
+	
 	Cleanup();
 
 	d3d_ = Direct3DCreate9(D3D_SDK_VERSION);
@@ -715,21 +720,19 @@ bool MainWnd::D3D9VideoRender::init() {
 	}
 
 	m_pDirect3DSurfaceRender = pDirect3DSurfaceRender;
-	inited_ = true;
 	return 0;
 }
 
 void MainWnd::D3D9VideoRender::OnFrame(const webrtc::VideoFrame& frame)
 {
-	rtc::scoped_refptr<webrtc::I420BufferInterface> buffer(frame.video_frame_buffer()->GetI420());
-	
-	//width_ = 160;// buffer->width();
-	//height_ = 120;// buffer->height();
-
-	init();
-
 	rtc::StringBuilder ss;
 	ss << "OnFrame\n";
+
+	/*if (static_cast<size_t>(frame.width()) != width_ ||
+		static_cast<size_t>(frame.height()) != height_) {
+		Resize(static_cast<size_t>(frame.width()),
+			static_cast<size_t>(frame.height()));
+	}*/
 
 	if (m_pDirect3DSurfaceRender == NULL) {
 		rtc::StringBuilder ss;
@@ -738,6 +741,7 @@ void MainWnd::D3D9VideoRender::OnFrame(const webrtc::VideoFrame& frame)
 	}
 
 	HRESULT lRet;
+	rtc::scoped_refptr<webrtc::I420BufferInterface> buffer(frame.video_frame_buffer()->GetI420());
 
 	D3DLOCKED_RECT d3d_rect;
 	lRet = m_pDirect3DSurfaceRender->LockRect(&d3d_rect, NULL, D3DLOCK_DONOTWAIT);
@@ -785,6 +789,12 @@ void MainWnd::D3D9VideoRender::OnFrame(const webrtc::VideoFrame& frame)
 	pBackBuffer->Release();
 }
 
+void MainWnd::D3D9VideoRender::Resize(size_t width, size_t height) {
+	width_ = width;
+	height_ = height;
+	init();
+}
+
 void MainWnd::D3D9VideoRender::Cleanup()
 {
 	EnterCriticalSection(&m_critial);
@@ -794,5 +804,161 @@ void MainWnd::D3D9VideoRender::Cleanup()
 		d3d_->Release();
 	if (d3d_)
 		d3d_->Release();
+	LeaveCriticalSection(&m_critial);
+}
+
+MainWnd::D3DTextureVideoRender::D3DTextureVideoRender(HWND wnd,
+	int x,
+	int y,
+	int width,
+	int height,
+	webrtc::VideoTrackInterface* track_to_render)
+	: wnd_(wnd),
+	rendered_track_(track_to_render),
+	width_(width),
+	height_(height),
+	x_(x),
+	y_(y) {
+	rendered_track_->AddOrUpdateSink(this, rtc::VideoSinkWants());
+
+	InitializeCriticalSection(&m_critial);
+	init();
+}
+
+bool MainWnd::D3DTextureVideoRender::init() {
+	if (wnd_ == NULL) {
+		Destroy();
+		return false;
+	}
+
+	d3d_ = Direct3DCreate9(D3D_SDK_VERSION);
+	if (d3d_ == NULL) {
+		Destroy();
+		return false;
+	}
+
+	D3DPRESENT_PARAMETERS d3d_params = {};
+
+	d3d_params.Windowed = TRUE;
+	d3d_params.SwapEffect = D3DSWAPEFFECT_COPY;
+
+	IDirect3DDevice9* d3d_device;
+	if (d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, wnd_,
+		D3DCREATE_SOFTWARE_VERTEXPROCESSING, &d3d_params,
+		&d3d_device) != D3D_OK) {
+		Destroy();
+		return false;
+	}
+	d3d_device_ = d3d_device;
+	d3d_device->Release();
+
+	IDirect3DVertexBuffer9* vertex_buffer;
+	const int kRectVertices = 4;
+	if (d3d_device_->CreateVertexBuffer(kRectVertices * sizeof(D3dCustomVertex),
+		0, D3DFVF_CUSTOMVERTEX, D3DPOOL_MANAGED,
+		&vertex_buffer, NULL) != D3D_OK) {
+		Destroy();
+		return false;
+	}
+	vertex_buffer_ = vertex_buffer;
+	vertex_buffer->Release();
+
+	d3d_device_->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+	d3d_device_->SetRenderState(D3DRS_LIGHTING, FALSE);
+	Resize(width_, height_);
+
+	d3d_device_->Present(NULL, &m_rtViewport, NULL, NULL);
+	return true;
+}
+
+void MainWnd::D3DTextureVideoRender::OnFrame(const webrtc::VideoFrame& frame) {
+	if (static_cast<size_t>(frame.width()) != width_ ||
+		static_cast<size_t>(frame.height()) != height_) {
+		Resize(static_cast<size_t>(frame.width()),
+			static_cast<size_t>(frame.height()));
+	}
+
+	D3DLOCKED_RECT lock_rect;
+	if (texture_->LockRect(0, &lock_rect, NULL, 0) != D3D_OK) {
+		return;
+	}
+
+	ConvertFromI420(frame, webrtc::VideoType::kARGB, 0, static_cast<uint8_t*>(lock_rect.pBits));
+	texture_->UnlockRect(0);
+
+	d3d_device_->BeginScene();
+	d3d_device_->SetFVF(D3DFVF_CUSTOMVERTEX);
+	d3d_device_->SetStreamSource(0, vertex_buffer_, 0, sizeof(D3dCustomVertex));
+	d3d_device_->SetTexture(0, texture_);
+	d3d_device_->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2);
+	d3d_device_->EndScene();
+
+	RECT rect;
+	rect.left = m_rtViewport.left;
+	rect.top = m_rtViewport.top;
+	rect.right = rect.left + 640;//äÖÈ¾µÄ¿í
+	rect.bottom = rect.top + 480;// äÖÈ¾µÄ¸ßm_rtViewport.bottom;
+	d3d_device_->Present(NULL, &rect, NULL, NULL);
+}
+
+MainWnd::D3DTextureVideoRender::~D3DTextureVideoRender() {
+	InitializeCriticalSection(&m_critial);
+	Destroy();
+	LeaveCriticalSection(&m_critial);
+}
+
+void MainWnd::D3DTextureVideoRender::Destroy() {
+	if (texture_) {
+		texture_->Release();
+	}
+
+	if (texture_) {
+		texture_->Release();
+	}
+
+	if (vertex_buffer_) {
+		vertex_buffer_->Release();
+	}
+
+	if (d3d_device_) {
+		d3d_device_->Release();
+	}
+
+	if (d3d_) {
+		d3d_->Release();
+	}
+}
+
+void MainWnd::D3DTextureVideoRender::Resize(size_t width, size_t height) {
+	InitializeCriticalSection(&m_critial);
+	width_ = width;
+	height_ = height;
+	IDirect3DTexture9* texture;
+
+	m_rtViewport.left = x_;
+	m_rtViewport.top = y_;
+	m_rtViewport.right = x_ + width_;
+	m_rtViewport.bottom = y_ + height_;
+
+	d3d_device_->CreateTexture(static_cast<UINT>(width_),
+		static_cast<UINT>(height_), 1, 0, D3DFMT_A8R8G8B8,
+		D3DPOOL_MANAGED, &texture, NULL);
+	texture_ = texture;
+	texture->Release();
+
+	// Vertices for the video frame to be rendered to.
+	static const D3dCustomVertex rect[] = {
+		{-1.0f, -1.0f, 0.0f, 0.0f, 1.0f},
+		{-1.0f, 1.0f, 0.0f, 0.0f, 0.0f},
+		{1.0f, -1.0f, 0.0f, 1.0f, 1.0f},
+		{1.0f, 1.0f, 0.0f, 1.0f, 0.0f},
+	};
+
+	void* buf_data;
+	if (vertex_buffer_->Lock(0, 0, &buf_data, 0) != D3D_OK)
+		return;
+
+	memcpy(buf_data, &rect, sizeof(rect));
+	vertex_buffer_->Unlock();
 	LeaveCriticalSection(&m_critial);
 }

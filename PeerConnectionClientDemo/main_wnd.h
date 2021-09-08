@@ -25,9 +25,11 @@
 #endif  // WEBRTC_WIN
 
 //d3d9
+#define D3D9TEXT
 #define D3D9
 #include <d3d9.h>
 #pragma comment(lib, "d3d9.lib")
+#include <WinNT.h>
 
 
 class MainWndCallback {
@@ -127,6 +129,7 @@ class MainWnd : public MainWindow {
 
   private:
 	  void Cleanup();
+	  void Resize(size_t width, size_t height);
 
   private:
 	  rtc::scoped_refptr<IDirect3D9> d3d_;
@@ -142,7 +145,50 @@ class MainWnd : public MainWindow {
 	  int y_ = 0;
 	  CRITICAL_SECTION  m_critial;
 	  rtc::scoped_refptr<webrtc::VideoTrackInterface> rendered_track_;
-	  bool inited_ = false;
+  };
+
+  class D3DTextureVideoRender : public rtc::VideoSinkInterface<webrtc::VideoFrame> {
+  public:
+#define D3DFVF_CUSTOMVERTEX (D3DFVF_XYZ | D3DFVF_TEX1)
+
+	  struct D3dCustomVertex {
+		  float x, y, z;
+		  float u, v;
+	  };
+
+	  D3DTextureVideoRender(HWND wnd,
+		  int x,
+		  int y,
+		  int width,
+		  int height,
+		  webrtc::VideoTrackInterface* track_to_render);
+
+	  virtual ~D3DTextureVideoRender();
+
+	  void OnFrame(const webrtc::VideoFrame& frame) override;
+
+  private:
+	  bool init();
+	  void Destroy();
+	  void Resize(size_t width, size_t height);
+
+  private:
+	  HWND wnd_;
+	  int width_ = 0;
+	  int height_ = 0;
+
+	  int x_ = 0;
+	  int y_ = 0;
+	  
+	  RECT m_rtViewport;
+	  rtc::scoped_refptr<IDirect3D9> d3d_;
+	  rtc::scoped_refptr<IDirect3DDevice9> d3d_device_;
+
+	  rtc::scoped_refptr<IDirect3DTexture9> texture_;
+	  rtc::scoped_refptr<IDirect3DVertexBuffer9> vertex_buffer_;
+
+	  rtc::scoped_refptr<webrtc::VideoTrackInterface> rendered_track_;
+	  CRITICAL_SECTION  m_critial;
   };
 
   class VideoRenderer : public rtc::VideoSinkInterface<webrtc::VideoFrame> {
@@ -199,7 +245,7 @@ class MainWnd : public MainWindow {
     LISTBOX_ID,
   };
 
-#ifndef D3D9
+#if !defined (D3D9) && !defined(D3D9TEXT)
   void OnPaint();
 #endif
   void OnDestroyed();
@@ -224,7 +270,10 @@ class MainWnd : public MainWindow {
   void HandleTabbing();
 
  private:
-#ifdef D3D9
+#ifdef D3D9TEXT
+	 std::unique_ptr<D3DTextureVideoRender> local_renderer_;
+	 std::unique_ptr<D3DTextureVideoRender> remote_renderer_;
+#elif defined D3D9
 	 std::unique_ptr<D3D9VideoRender> local_renderer_;
 	 std::unique_ptr<D3D9VideoRender> remote_renderer_;
 #else
